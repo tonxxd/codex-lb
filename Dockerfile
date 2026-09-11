@@ -7,8 +7,8 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target,target=/src/target \
     cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
     && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
@@ -17,7 +17,7 @@ FROM oven/bun:1.4.2-alpine AS frontend-build
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/bun.lock ./
-RUN --mount=type=cache,target=/root/.bun/install/cache \
+RUN --mount=type=cache,id=bun-install-cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
 
 COPY frontend ./
@@ -38,7 +38,7 @@ RUN python -m venv --without-pip /opt/venv
 ENV PATH="/opt/venv/bin:/usr/local/bin:$PATH"
 
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing
 
 FROM python:3.14-slim AS runtime
