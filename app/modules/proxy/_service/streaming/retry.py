@@ -25,7 +25,15 @@ from app.core.clients.proxy import (
     is_confirmed_pre_dispatch_transport_error,
     pop_stream_timeout_overrides,
 )
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+    cache_scope_payload_overhead_bytes,
+)
+from app.core.clients.thread_cache_identity import (
+    effective_thread_cache_identity_mode as _effective_thread_cache_identity_mode,
+)
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.errors import (
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
     openai_error,
@@ -45,7 +53,7 @@ from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event
-from app.db.models import Account, StickySessionKind
+from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
@@ -357,6 +365,16 @@ class _StreamingRetryMixin:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        # Resolved once per request: the API-key override wins, then the fleet
+        # value. ``shared`` is a strict no-op downstream. The fleet value is read
+        # off the *overlaid* settings, not the raw dashboard row: the row's column
+        # is NULL until an operator sets it, so reading it directly would keep the
+        # proxy on ``shared`` while ``GET /api/settings`` reported the environment
+        # value as effective. ``DASHBOARD_MODE_SETTINGS`` puts the column back on
+        # top where it belongs -- dashboard over environment over default.
+        thread_cache_identity_mode, thread_cache_identity_from_key = _effective_thread_cache_identity_mode(
+            api_key, with_dashboard_overrides(base_settings)
+        )
         upstream_transport_policy_label = "explicit" if upstream_stream_transport_override is not None else "configured"
         upstream_transport_sticky = _http_downstream_request_is_sticky(payload, headers)
         preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
@@ -391,7 +409,13 @@ class _StreamingRetryMixin:
                 model=payload.model,
                 headers=headers,
                 has_image_generation_tool=image_generation_bypass,
-                payload_size_estimate_bytes=payload_size_estimate,
+                # Include what isolated mode will inject: that choice is passed
+                # down as an explicit override, which short-circuits the
+                # post-injection size check, so a request just under the
+                # websocket budget has to be measured at its egress size here.
+                payload_size_estimate_bytes=(
+                    payload_size_estimate + cache_scope_payload_overhead_bytes(thread_cache_identity_mode)
+                ),
             )
             upstream_stream_transport = resolved_base_transport
             if not explicit_transport and (
@@ -441,7 +465,6 @@ class _StreamingRetryMixin:
         if rewritten_file_account_id is None and not file_account_resolution_complete:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -462,21 +485,17 @@ class _StreamingRetryMixin:
                 api_key=api_key,
                 fail_on_missing=not _is_synthesized_turn_state(turn_state),
             )
-        sticky_key_source = "none"
-        if affinity.codex_session_source == "thread_header":
-            sticky_key_source = "thread_header"
-        elif affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = "session_header"
-        elif affinity.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
-        affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+        affinity_observation = AffinityObservation.from_policy(affinity)
         _maybe_log_proxy_request_shape(
             "stream",
             payload,
             headers,
-            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=affinity_observation.kind,
+            sticky_key_source=affinity_observation.source,
+            derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+            thread_cache_identity_mode=thread_cache_identity_mode,
+            thread_cache_identity_from_key=thread_cache_identity_from_key,
         )
         routing_strategy = _facade()._routing_strategy(settings)
         max_attempts = _facade()._STREAM_MAX_ACCOUNT_ATTEMPTS
@@ -966,6 +985,7 @@ class _StreamingRetryMixin:
                     client_ip=client_ip,
                     tool_call_dedupe=tool_call_dedupe,
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    thread_cache_identity=ThreadCacheIdentity(thread_cache_identity_mode, account.id),
                 )
                 try:
                     try:
@@ -1089,7 +1109,7 @@ class _StreamingRetryMixin:
                     settlement.error_message = error_message
                     settlement.error = exc.error
                     settlement.account_health_error = (
-                        _facade()._should_penalize_stream_error(exc.code)
+                        _facade()._should_penalize_stream_error(exc.code, error_message)
                         or is_upstream_model_capacity_error(error_message)
                         or exc.account_health_error
                     )
@@ -2291,6 +2311,7 @@ class _StreamingRetryMixin:
                                 ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                                thread_cache_identity=ThreadCacheIdentity(thread_cache_identity_mode, account.id),
                             )
                             try:
                                 try:
@@ -2400,7 +2421,9 @@ class _StreamingRetryMixin:
                                     settlement.error = _upstream_error_from_openai(error)
                                 else:
                                     settlement.error = tex.error
-                                settlement.account_health_error = _facade()._should_penalize_stream_error(error_code)
+                                settlement.account_health_error = _facade()._should_penalize_stream_error(
+                                    error_code, error_message
+                                )
                                 transient_upstream_http_status = (
                                     tex.status_code if isinstance(tex, ProxyResponseError) else None
                                 )
@@ -2701,13 +2724,25 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
-                                    http_status=tex.status_code,
-                                    **_retry_after_kwargs(tex.retry_after_seconds),
-                                )
+                                # Workspace failures are terminal for this
+                                # owner; defer keyed health until settlement.
+                                # Preserve the existing policy for other codes.
+                                if classified["failure_class"] == "account_unavailable":
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        retry_after_seconds=tex.retry_after_seconds,
+                                    )
+                                else:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        **_retry_after_kwargs(tex.retry_after_seconds),
+                                    )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:
                                     _stamp_surfaced_burst_retry_after(tex)
@@ -3202,7 +3237,9 @@ class _StreamingRetryMixin:
                                 settlement.error_code = error_code
                                 settlement.error_message = error_message
                                 settlement.error = _upstream_error_from_openai(error)
-                                settlement.account_health_error = _facade()._should_penalize_stream_error(error_code)
+                                settlement.account_health_error = _facade()._should_penalize_stream_error(
+                                    error_code, error_message
+                                )
                                 settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 if settled and settlement.account_health_error:
                                     await proxy._handle_stream_error(
@@ -3511,7 +3548,7 @@ class _StreamingRetryMixin:
                     if (
                         health_write_allowed
                         and not getattr(exc, _STREAM_HEALTH_RECORDED_ATTR, False)
-                        and _facade()._should_penalize_stream_error(error_code)
+                        and _facade()._should_penalize_stream_error(error_code, error_message)
                     ):
                         await proxy._handle_stream_error(
                             account,

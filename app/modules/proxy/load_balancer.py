@@ -1668,6 +1668,7 @@ class LoadBalancer:
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
         initial_preferred_account_id: str | None = None,
         preserve_existing_mapping_on_fallback: bool = False,
+        preserve_reason_request_local: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
         allow_usage_exhaustion_error: bool = True,
@@ -1694,6 +1695,7 @@ class LoadBalancer:
             sticky_existing_account_id=sticky_existing_account_id,
             initial_preferred_account_id=initial_preferred_account_id,
             preserve_existing_mapping_on_fallback=preserve_existing_mapping_on_fallback,
+            preserve_reason_request_local=preserve_reason_request_local,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
@@ -1855,6 +1857,13 @@ class LoadBalancer:
                 account=account,
                 monthly_entry=monthly_entry,
                 secondary_entry=secondary_entry,
+            )
+            # Repository teardown rolls back reads and expires ORM rows. Keep
+            # loaded snapshots for normalization after the session has closed.
+            account = _clone_account(account)
+            primary_entry = clone_row(primary_entry) if primary_entry is not None else None
+            effective_secondary_entry = (
+                clone_row(effective_secondary_entry) if effective_secondary_entry is not None else None
             )
             now = self._clock.time()
             normalized_usage = _normalize_usage_inputs(

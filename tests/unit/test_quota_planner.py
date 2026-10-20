@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.balancer import AccountState
 from app.db.models import Account, AccountStatus, RequestLog
@@ -22,8 +23,15 @@ from app.modules.quota_planner.logic import (
     simulate_pool,
 )
 from app.modules.quota_planner.repository import DemandBin, QuotaPlannerRepository, _to_db_naive_utc
+from app.modules.quota_planner.schemas import QuotaPlannerSettingsUpdateRequest
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("value", ["24:00", "12:60", "99:99", "０９:００", "09:00\n"])
+def test_settings_update_requires_real_clock_times(value: str) -> None:
+    with pytest.raises(ValidationError):
+        QuotaPlannerSettingsUpdateRequest(working_hours_start=value)
 
 
 def _forecast(
@@ -112,6 +120,16 @@ def test_build_routing_costs_skips_accounts_without_short_windows() -> None:
 
     assert "weekly-only" not in costs
     assert costs["cold-5h"].total == 40.0
+
+
+@pytest.mark.parametrize("timezone_name", ["/Europe/Stockholm", "Europe/../Stockholm", "Unknown/Timezone"])
+def test_build_routing_costs_uses_utc_for_legacy_invalid_timezone(timezone_name: str) -> None:
+    now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
+    states = [AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300)]
+
+    costs = build_routing_costs(settings=PlannerSettings(timezone=timezone_name), states=states, now=now)
+
+    assert costs == build_routing_costs(settings=PlannerSettings(timezone="UTC"), states=states, now=now)
 
 
 def test_build_routing_costs_treats_live_primary_window_as_active() -> None:

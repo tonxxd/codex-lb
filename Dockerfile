@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.12 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.13.1 AS uv-bin
 
-FROM rust:1.96.0-slim-bookworm AS native-egress-build
+FROM rust:1.99.0-slim-bookworm AS native-egress-build
 
 WORKDIR /src
 
@@ -12,7 +12,7 @@ RUN --mount=type=cache,id=s/9bc5d72a-0a8e-4723-ba76-a4ed3bd7ea09-/usr/local/carg
     cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
     && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
-FROM oven/bun:1.4.2-alpine AS frontend-build
+FROM oven/bun:1.4.3-alpine AS frontend-build
 
 WORKDIR /app/frontend
 
@@ -51,8 +51,9 @@ WORKDIR /app
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
-        bsdutils libblkid1 libc-bin libc6 libcap2 libmount1 libsmartcols1 libssl3t64 \
-        libsystemd0 libudev1 libuuid1 openssl sed util-linux \
+        bsdutils gzip libblkid1 libc-bin libc6 libcap2 libmount1 libpcre2-8-0 \
+        libsmartcols1 libsqlite3-0 libssl3t64 \
+        libsystemd0 libudev1 libuuid1 openssl perl-base sed util-linux \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssl-provider-legacy \
     && rm -rf /var/lib/apt/lists/*
