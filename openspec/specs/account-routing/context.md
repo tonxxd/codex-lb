@@ -19,6 +19,13 @@ refresh failure excludes the account only from that request's remaining movable
 retries. Paused, deactivated, deleted, and security-ineligible accounts retain
 their hard exclusions.
 
+An explicit upstream access-token revocation is different from a refresh-token
+warning: the rejected token is ineligible. Before visible output, a complete
+unanchored HTTP transcript can recover on another account. The replay check
+omits known session/thread/turn telemetry, including the current Codex client's
+`root_turn_id`, while continuing to reject unknown account-owned state and
+stored response or file anchors.
+
 ## Replica-local soft health
 
 Error counts, backoff, health tiers, and probe streaks are advisory signals.

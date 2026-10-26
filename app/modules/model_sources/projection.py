@@ -62,21 +62,25 @@ def project_abliteration_history(payload: MutableJsonObject, *, supports_vision:
 
     Opaque reasoning belongs to its original provider. Completed custom calls
     retain their names, call IDs, input and output as function-call history.
-    Only tool-result images are replaced for text models; user images still
-    reach the provider's normal modality validation.
+    Tool-result images become labeled messages for vision models and text
+    references for text models. Current user images retain normal validation.
     """
     items = payload.get("input")
     if not isinstance(items, list):
         return
     projected: list[JsonValue] = []
+    pending_images: list[JsonValue] = []
     for original in items:
+        kind = original.get("type") if isinstance(original, dict) else None
+        if kind == "reasoning":
+            continue
+        if pending_images and kind not in ("function_call_output", "custom_tool_call_output"):
+            projected.append(_abliteration_tool_image_message(pending_images))
+            pending_images = []
         if not isinstance(original, dict):
             projected.append(original)
             continue
         item = dict(original)
-        kind = item.get("type")
-        if kind == "reasoning":
-            continue
         if kind == "custom_tool_call" and isinstance(item.get("input"), str):
             item["type"] = "function_call"
             item["arguments"] = json.dumps({"input": item.pop("input")}, ensure_ascii=False)
@@ -85,16 +89,30 @@ def project_abliteration_history(payload: MutableJsonObject, *, supports_vision:
             item["type"] = "function_call_output"
             item.pop("id", None)
         output = item.get("output")
-        if (
-            not supports_vision
-            and kind in ("function_call_output", "custom_tool_call_output")
-            and isinstance(output, list)
-        ):
+        if kind in ("function_call_output", "custom_tool_call_output") and isinstance(output, list):
+            if supports_vision:
+                pending_images.extend(
+                    part for part in output if isinstance(part, dict) and part.get("type") == "input_image"
+                )
+            image_reference = (
+                "[Earlier tool image follows in a separate message.]"
+                if supports_vision
+                else "[Earlier tool image omitted: this model accepts text only.]"
+            )
             item["output"] = [
-                {"type": "input_text", "text": "[Earlier tool image omitted: this model accepts text only.]"}
+                {"type": "input_text", "text": image_reference}
                 if isinstance(part, dict) and part.get("type") == "input_image"
                 else part
                 for part in output
             ]
         projected.append(item)
+    if pending_images:
+        projected.append(_abliteration_tool_image_message(pending_images))
     payload["input"] = projected
+
+
+def _abliteration_tool_image_message(images: list[JsonValue]) -> JsonValue:
+    return {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Images from earlier tool results."}, *images],
+    }

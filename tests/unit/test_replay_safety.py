@@ -35,6 +35,7 @@ def test_unanchored_auth_recovery_refuses_account_owned_state(anchor):
 def test_unanchored_auth_recovery_supports_codex_lite_namespace_history():
     fixture = Path(__file__).resolve().parents[1] / "fixtures/codex_bodies/gpt56_lite_bundle.json"
     payload = ResponsesRequest.model_validate(json.loads(fixture.read_text())).to_replay_safety_payload()
+    payload["client_metadata"]["root_turn_id"] = "root-native-turn"
     payload["input"].extend(
         [
             {"type": "reasoning", "id": "rs_prior", "encrypted_content": "prior-account-ciphertext"},
@@ -60,6 +61,14 @@ def test_unanchored_auth_recovery_rejects_unknown_namespace_fields():
     payload: dict[str, JsonValue] = {
         "input": [{"role": "user", "content": "Continue"}],
         "tools": [{"type": "namespace", "name": "functions", "tools": [{"name": "probe"}], "unknown_owner": "owned"}],
+    }
+    assert project_unanchored_account_neutral_replay(payload) is None
+
+
+def test_unanchored_auth_recovery_rejects_unknown_client_metadata():
+    payload: dict[str, JsonValue] = {
+        "input": [{"role": "user", "content": "Continue"}],
+        "client_metadata": {"root_turn_id": "root-native-turn", "future_account_handle": "acct-owned"},
     }
     assert project_unanchored_account_neutral_replay(payload) is None
 

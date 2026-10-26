@@ -41,6 +41,7 @@ async def _create_model_source(
     supports_streaming: bool = True,
     supports_audio_transcriptions: bool = False,
     supports_embeddings: bool = False,
+    supports_vision: bool = False,
 ) -> str:
     model_entry: dict[str, object] = {
         "model": model,
@@ -49,6 +50,7 @@ async def _create_model_source(
         "maxOutputTokens": 1024,
         "supportsStreaming": supports_streaming,
         "supportsTools": True,
+        "supportsVision": supports_vision,
     }
     if raw_metadata_json is not None:
         model_entry["rawMetadataJson"] = raw_metadata_json

@@ -978,6 +978,8 @@ async def test_revoked_native_http_session_continues_on_another_account(async_cl
     fixture = Path(__file__).resolve().parents[1] / "fixtures/codex_bodies/gpt56_lite_bundle.json"
     payload = json.loads(fixture.read_text())
     payload["model"] = "gpt-5.1"
+    payload.pop("instructions")
+    payload["client_metadata"]["root_turn_id"] = "root-native-turn"
     payload["input"].extend(
         [
             {"type": "reasoning", "id": "rs_native", "encrypted_content": "old-account-ciphertext"},

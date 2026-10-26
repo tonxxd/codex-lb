@@ -286,7 +286,9 @@ def project_unanchored_account_neutral_replay(payload: Mapping[str, JsonValue]) 
     metadata = replay_payload.get("client_metadata")
     if isinstance(metadata, dict):
         replay_payload["client_metadata"] = {
-            key: value for key, value in metadata.items() if key not in {"session_id", "thread_id", "turn_id"}
+            key: value
+            for key, value in metadata.items()
+            if key not in {"session_id", "thread_id", "turn_id", "root_turn_id"}
         }
     stream_options = replay_payload.get("stream_options")
     if stream_options is not None:
