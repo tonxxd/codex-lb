@@ -4,6 +4,7 @@ import time
 from collections.abc import Collection
 
 from app.core.auth import token_expiry_epoch_ms
+from app.core.balancer.logic import PERMANENT_FAILURE_CODES
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 
@@ -48,6 +49,10 @@ def stored_access_token_expires_at(
 
 def account_access_token_expires_at(account: Account, encryptor: TokenEncryptor) -> float | None:
     """Return an account snapshot's known access-token expiry."""
+    # An explicit rejection is stronger evidence than the token's encoded exp.
+    # Reauthentication clears the failure reason with the credential rotation.
+    if account.deactivation_reason == PERMANENT_FAILURE_CODES["token_revoked"]:
+        return 0.0
     encrypted_access_token = getattr(account, "access_token_encrypted", None)
     return stored_access_token_expires_at(encrypted_access_token, encryptor)
 

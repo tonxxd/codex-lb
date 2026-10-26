@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from app.core.openai.requests import ResponsesRequest
@@ -10,10 +13,55 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    project_unanchored_account_neutral_replay,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+
+
+@pytest.mark.parametrize("anchor", ["response", "file", "unpaired_call"])
+def test_unanchored_auth_recovery_refuses_account_owned_state(anchor):
+    payload: dict[str, JsonValue] = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hello"}]}
+    if anchor == "response":
+        payload["previous_response_id"] = "resp_owned"
+    elif anchor == "file":
+        payload["input"] = [{"role": "user", "content": [{"type": "input_file", "file_id": "file-owned"}]}]
+    else:
+        payload["input"] = [{"type": "function_call_output", "call_id": "missing-call", "output": "result"}]
+    assert project_unanchored_account_neutral_replay(payload) is None
+
+
+def test_unanchored_auth_recovery_supports_codex_lite_namespace_history():
+    fixture = Path(__file__).resolve().parents[1] / "fixtures/codex_bodies/gpt56_lite_bundle.json"
+    payload = ResponsesRequest.model_validate(json.loads(fixture.read_text())).to_replay_safety_payload()
+    payload["input"].extend(
+        [
+            {"type": "reasoning", "id": "rs_prior", "encrypted_content": "prior-account-ciphertext"},
+            {
+                "type": "function_call",
+                "call_id": "call_prior",
+                "namespace": "functions",
+                "name": "exec",
+                "arguments": '{"code":"test"}',
+            },
+            {"type": "function_call_output", "call_id": "call_prior", "output": "Prior tool result"},
+            {"role": "user", "content": "Continue"},
+        ]
+    )
+    replay = project_unanchored_account_neutral_replay(payload)
+    assert replay is not None
+    assert not any(isinstance(item, dict) and item.get("type") == "reasoning" for item in replay)
+    assert not any(isinstance(item, dict) and "namespace" in item for item in replay)
+    assert replay[-1] == {"role": "user", "content": "Continue"}
+
+
+def test_unanchored_auth_recovery_rejects_unknown_namespace_fields():
+    payload: dict[str, JsonValue] = {
+        "input": [{"role": "user", "content": "Continue"}],
+        "tools": [{"type": "namespace", "name": "functions", "tools": [{"name": "probe"}], "unknown_owner": "owned"}],
+    }
+    assert project_unanchored_account_neutral_replay(payload) is None
 
 
 @pytest.mark.parametrize(

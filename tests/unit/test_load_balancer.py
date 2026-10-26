@@ -1800,6 +1800,15 @@ def test_handle_permanent_failure_sets_reauth_required_for_token_invalidated():
     assert state.deactivation_reason == "Authentication token invalidated - re-login required"
 
 
+def test_revoked_access_token_is_excluded_even_before_encoded_expiry():
+    state = AccountState("revoked", AccountStatus.ACTIVE, access_token_expires_at=2_000_000_000)
+    healthy = AccountState("healthy", AccountStatus.ACTIVE)
+    handle_permanent_failure(state, "token_revoked")
+    assert state.status == AccountStatus.REAUTH_REQUIRED
+    result = select_account([state, healthy], now=1_700_000_000)
+    assert result.account is healthy
+
+
 def test_handle_permanent_failure_sets_reason_for_account_deactivated():
     state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
     handle_permanent_failure(state, "account_deactivated")

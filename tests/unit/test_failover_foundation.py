@@ -28,6 +28,16 @@ pytestmark = pytest.mark.unit
 
 
 class TestClassifyUpstreamFailure:
+    @pytest.mark.parametrize("http_status", [401, 502, None])
+    def test_revoked_access_token_is_account_unavailable(self, http_status: int | None) -> None:
+        result = classify_upstream_failure(
+            error_code="token_revoked",
+            error=UpstreamError(message="Encountered invalidated oauth token for user, failing request"),
+            http_status=http_status,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "account_unavailable"
+
     @pytest.mark.parametrize("http_status", [402, None, 500])
     def test_deactivated_workspace_is_account_unavailable(self, http_status: int | None) -> None:
         result = classify_upstream_failure(

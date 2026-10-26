@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from functools import partial
 from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import anyio
@@ -245,7 +246,7 @@ from app.modules.model_sources.forwarding import (
 from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
-from app.modules.model_sources.projection import strip_source_telemetry
+from app.modules.model_sources.projection import project_abliteration_history, strip_source_telemetry
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
@@ -5282,6 +5283,11 @@ def _shape_source_responses_payload(
         else:
             source_payload["reasoning"] = {"effort": source_reasoning_effort}
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
+    if urlsplit(source.base_url).hostname == "api.abliteration.ai":
+        project_abliteration_history(
+            source_payload,
+            supports_vision=any(entry.model == payload.model and entry.supports_vision for entry in source.models),
+        )
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
     _drop_unsupported_source_response_tools(

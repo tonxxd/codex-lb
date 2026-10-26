@@ -150,7 +150,7 @@ def classify_upstream_failure(
     phase: FailurePhase,
 ) -> ClassifiedFailure:
     failure_class: FailureClass
-    if error_code == "deactivated_workspace":
+    if error_code in {"deactivated_workspace", "token_revoked"}:
         failure_class = "account_unavailable"
     elif error_code in _RATE_LIMIT_CODES:
         failure_class = "rate_limit"

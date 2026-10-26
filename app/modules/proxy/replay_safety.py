@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
-from app.core.openai.requests import extract_input_file_ids
+from app.core.openai.requests import extract_input_file_ids, strip_replayed_tool_call_namespaces_from_payload
 from app.core.types import JsonValue
 
 _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
@@ -250,6 +250,55 @@ def _project_account_neutral_replay_item(
     projected_item = dict(item)
     projected_item.pop("id")
     return projected_item
+
+
+def project_unanchored_account_neutral_replay(payload: Mapping[str, JsonValue]) -> list[JsonValue] | None:
+    """Recover a complete, unanchored transcript after a proven auth rejection.
+
+    No stored response, file reference, unpaired call, or unknown account-bound
+    field may cross accounts. Known per-message telemetry and provider-owned
+    bookkeeping are unnecessary when replaying the visible transcript.
+    """
+    if payload.get("previous_response_id") is not None:
+        return None
+    items = payload.get("input")
+    if not isinstance(items, list) or not items:
+        return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(items, stored_count=len(items))
+    if projection is None:
+        return None
+    replay_items: list[JsonValue] = []
+    for item in projection.input_items:
+        if isinstance(item, dict):
+            item = dict(item)
+            item.pop(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD, None)
+        replay_items.append(item)
+    if not replay_items:
+        return None
+    replay_payload = dict(payload)
+    replay_payload["input"] = replay_items
+    strip_replayed_tool_call_namespaces_from_payload(replay_payload)
+    # Responses-Lite's all-turns mode and client telemetry describe this
+    # self-contained request; they do not reference stored account objects.
+    reasoning = replay_payload.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("context") == "all_turns":
+        replay_payload["reasoning"] = {key: value for key, value in reasoning.items() if key != "context"}
+    metadata = replay_payload.get("client_metadata")
+    if isinstance(metadata, dict):
+        replay_payload["client_metadata"] = {
+            key: value for key, value in metadata.items() if key not in {"session_id", "thread_id", "turn_id"}
+        }
+    stream_options = replay_payload.get("stream_options")
+    if stream_options is not None:
+        if not isinstance(stream_options, dict) or not set(stream_options) <= {
+            "reasoning_summary_delivery",
+            "include_obfuscation",
+        }:
+            return None
+        replay_payload.pop("stream_options")
+    normalized_items = replay_payload["input"]
+    assert isinstance(normalized_items, list)
+    return normalized_items if responses_payload_is_account_neutral_fresh_replay(replay_payload) else None
 
 
 def responses_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
@@ -820,6 +869,18 @@ def _tools_are_account_neutral(tools: JsonValue) -> bool:
 
 def _tool_declaration_is_account_neutral(tool: Mapping[str, JsonValue]) -> bool:
     tool_type = tool.get("type")
+    if tool_type == "namespace":
+        if not set(tool) <= {"type", "name", "description", "tools"} or not _is_nonblank_string(tool.get("name")):
+            return False
+        children = tool.get("tools")
+        return (
+            (tool.get("description") is None or isinstance(tool.get("description"), str))
+            and isinstance(children, list)
+            and all(
+                isinstance(child, dict) and _tool_declaration_is_account_neutral({"type": "function", **child})
+                for child in children
+            )
+        )
     if not isinstance(tool_type, str) or tool_type not in _ACCOUNT_NEUTRAL_TOOL_TYPES:
         return False
     if any(key not in _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS[tool_type] for key in tool):

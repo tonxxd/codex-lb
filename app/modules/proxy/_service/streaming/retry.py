@@ -110,7 +110,10 @@ from app.modules.proxy.helpers import (
 )
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_unanchored_account_neutral_replay,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -514,6 +517,7 @@ class _StreamingRetryMixin:
         current_account_lease: AccountLease | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
+        recovered_unanchored_account_ids: set[str] = set()
         transient_failed_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
         # Owner-bound burst 429 same-account retries; reset when the counter's
@@ -950,6 +954,44 @@ class _StreamingRetryMixin:
                 outcome,
                 account_id,
             )
+            return True
+
+        def _recover_unanchored_replay(account_id: str) -> bool:
+            nonlocal payload, affinity, headers, preferred_account_id, require_preferred_account
+            nonlocal payload_replay_required_account_id, turn_state_owner_account_id
+            if (
+                routing_strategy == "single_account"
+                or account_id in recovered_unanchored_account_ids
+                or file_preferred_account_id is not None
+                or (turn_state is not None and not _is_synthesized_turn_state(turn_state))
+            ):
+                return False
+            replay_items = project_unanchored_account_neutral_replay(payload.to_replay_safety_payload())
+            if replay_items is None:
+                return False
+            payload = payload.model_copy(update={"input": replay_items})
+            headers = {key: value for key, value in headers.items() if key.lower() != "x-codex-turn-state"}
+            payload_replay_required_account_id = None
+            turn_state_owner_account_id = None
+            preferred_account_id = None
+            require_preferred_account = False
+            excluded_account_ids.add(account_id)
+            recovered_unanchored_account_ids.add(account_id)
+            fresh_affinity = _sticky_key_for_responses_request(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                openai_cache_affinity=openai_cache_affinity,
+                openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+                sticky_threads_enabled=settings.sticky_threads_enabled,
+                api_key=api_key,
+            )
+            # The complete replay no longer depends on the legacy raw-session
+            # owner. Keep its old mapping intact for other, anchored requests.
+            affinity = replace(
+                fresh_affinity, reallocate_sticky=True, legacy_codex_session_key=None, seed_selection_key=None
+            )
+            logger.info("unanchored_auth_replay request_id=%s failed_account_id=%s", request_id, account_id)
             return True
 
         async def _stream_post_refresh_with_capacity_recovery(
@@ -1479,6 +1521,13 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     account = selection.account
+                    if (
+                        account is None
+                        and selection.error_code == "preferred_account_unavailable"
+                        and effective_preferred_account_id is not None
+                        and _recover_unanchored_replay(effective_preferred_account_id)
+                    ):
+                        continue
                     current_account_lease = selection.lease
                     if selection.lease is not None:
                         account_leases.append(selection.lease)
@@ -2916,6 +2965,24 @@ class _StreamingRetryMixin:
                         # replaying side effects on this or another account.
                         await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         raise
+                    rejected_error = _parse_openai_error(exc.payload)
+                    if (
+                        rejected_error is not None
+                        and rejected_error.code == "token_revoked"
+                        and not settlement.downstream_visible
+                        and attempt < max_attempts - 1
+                        and _recover_unanchored_replay(account.id)
+                    ):
+                        await _handle_or_defer_keyed_stream_health(
+                            account,
+                            _upstream_error_from_openai(rejected_error),
+                            "token_revoked",
+                            http_status=exc.status_code,
+                        )
+                        await _release_tracked_stream_lease(current_account_lease)
+                        current_account_lease = None
+                        last_transient_exc = exc
+                        continue
                     if _facade()._is_proxy_budget_exhausted_error(exc):
                         await _settle_process_network_budget_exhaustion(account, settlement)
                         if preserve_native_failure_lifecycle:

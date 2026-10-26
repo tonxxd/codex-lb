@@ -15,6 +15,7 @@ import base64
 import json
 import logging
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -834,12 +835,14 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 @pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
 @pytest.mark.parametrize("owner_bound", [False, True])
 @pytest.mark.parametrize("keyed", [False, True])
+@pytest.mark.parametrize("failure_code", ["deactivated_workspace", "token_revoked"])
 async def test_stream_deactivated_workspace_scopes_exclusion_and_failover(
     async_client,
     monkeypatch,
     path: str,
     owner_bound: bool,
     keyed: bool,
+    failure_code: str,
 ):
     account_a_id = await _import_account(async_client, "acc_workspace_a", "workspace-a@example.test")
     account_b_id = await _import_account(async_client, "acc_workspace_b", "workspace-b@example.test")
@@ -879,8 +882,13 @@ async def test_stream_deactivated_workspace_scopes_exclusion_and_failover(
         seen_account_ids.append(account_id)
         if account_id == "acc_workspace_a":
             raise ProxyResponseError(
-                402,
-                openai_error("deactivated_workspace", "Workspace has been deactivated"),
+                502 if failure_code == "token_revoked" else 402,
+                openai_error(
+                    failure_code,
+                    "Encountered invalidated oauth token"
+                    if failure_code == "token_revoked"
+                    else "Workspace has been deactivated",
+                ),
                 failure_phase="status",
             )
         yield _success_sse_event("resp_workspace_ok")
@@ -889,8 +897,15 @@ async def test_stream_deactivated_workspace_scopes_exclusion_and_failover(
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     if owner_bound:
         payload["input"] = [{"type": "reasoning", "id": "rs_workspace", "encrypted_content": "owner-bound"}]
+        if failure_code == "token_revoked":
+            payload["input"] = [
+                {"role": "user", "content": "Earlier prompt"},
+                *payload["input"],
+                {"role": "assistant", "content": "Earlier answer"},
+                {"role": "user", "content": "Continue"},
+            ]
     response = await async_client.post(path, json=payload, headers=headers)
-    if owner_bound:
+    if owner_bound and failure_code != "token_revoked":
         assert seen_account_ids == ["acc_workspace_a"]
         if response.status_code == 402:
             assert response.json()["error"]["code"] == "deactivated_workspace"
@@ -914,10 +929,76 @@ async def test_stream_deactivated_workspace_scopes_exclusion_and_failover(
         unavailable = await session.get(Account, account_a_id)
         healthy = await session.get(Account, account_b_id)
         assert unavailable is not None and healthy is not None
-        assert unavailable.status == AccountStatus.DEACTIVATED
-        assert unavailable.deactivation_reason == "Workspace has been deactivated"
+        assert unavailable.status == (
+            AccountStatus.REAUTH_REQUIRED if failure_code == "token_revoked" else AccountStatus.DEACTIVATED
+        )
+        assert unavailable.deactivation_reason == (
+            "Authentication access token revoked - re-login required"
+            if failure_code == "token_revoked"
+            else "Workspace has been deactivated"
+        )
         assert healthy.status == AccountStatus.ACTIVE
         assert healthy.deactivation_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyed", [False, True])
+async def test_revoked_native_http_session_continues_on_another_account(async_client, monkeypatch, keyed):
+    await _import_account(async_client, "acc_native_a", "native-a@example.test")
+    await _import_account(async_client, "acc_native_b", "native-b@example.test")
+    settings = await async_client.put("/api/settings", json={"httpDownstreamTransportPolicy": "always_http"})
+    assert settings.status_code == 200
+    seen = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen.append(account_id)
+        if account_id == "acc_native_a" and len(seen) > 1:
+            raise ProxyResponseError(502, openai_error("token_revoked", "Revoked access token"), failure_phase="status")
+        yield _success_sse_event("resp_native_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    headers = {"session_id": "revoked-native-session", "thread_id": "revoked-native-thread"}
+    key_id = None
+    if keyed:
+        await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "native-replay",
+                "transportPolicyOverride": "always_http",
+                "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000}],
+            },
+        )
+        assert created.status_code == 200
+        key_id = created.json()["id"]
+        headers["authorization"] = f"Bearer {created.json()['key']}"
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": "Earlier prompt", "stream": True}
+    first = await async_client.post("/backend-api/codex/responses", json=payload, headers=headers)
+    assert first.status_code == 200
+    fixture = Path(__file__).resolve().parents[1] / "fixtures/codex_bodies/gpt56_lite_bundle.json"
+    payload = json.loads(fixture.read_text())
+    payload["model"] = "gpt-5.1"
+    payload["input"].extend(
+        [
+            {"type": "reasoning", "id": "rs_native", "encrypted_content": "old-account-ciphertext"},
+            {"role": "assistant", "content": "Earlier answer"},
+            {"role": "user", "content": "Continue"},
+        ]
+    )
+    second = await async_client.post("/backend-api/codex/responses", json=payload, headers=headers)
+    assert second.status_code == 200
+    assert "response.completed" in second.text
+    assert "response.failed" not in second.text
+    assert seen == ["acc_native_a", "acc_native_a", "acc_native_b"]
+    third = await async_client.post("/backend-api/codex/responses", json=payload, headers=headers)
+    assert third.status_code == 200
+    assert seen[-1] == "acc_native_b"
+    if key_id is not None:
+        from app.db.models import ApiKeyLimit
+
+        async with SessionLocal() as session:
+            billed = await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key_id))
+            assert billed == 6
 
 
 @pytest.mark.asyncio

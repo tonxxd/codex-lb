@@ -8,6 +8,8 @@ verbatim: direct source routing never fails closed on an unknown field.
 
 from __future__ import annotations
 
+import json
+
 from app.core.types import JsonValue
 
 type MutableJsonObject = dict[str, JsonValue]
@@ -53,3 +55,46 @@ def strip_source_telemetry(payload: MutableJsonObject) -> MutableJsonObject:
         if removed and not stream_options:
             del payload[STREAM_OPTIONS_FIELD]
     return payload
+
+
+def project_abliteration_history(payload: MutableJsonObject, *, supports_vision: bool) -> None:
+    """Translate prior Codex output into Abliteration's supported input vocabulary.
+
+    Opaque reasoning belongs to its original provider. Completed custom calls
+    retain their names, call IDs, input and output as function-call history.
+    Only tool-result images are replaced for text models; user images still
+    reach the provider's normal modality validation.
+    """
+    items = payload.get("input")
+    if not isinstance(items, list):
+        return
+    projected: list[JsonValue] = []
+    for original in items:
+        if not isinstance(original, dict):
+            projected.append(original)
+            continue
+        item = dict(original)
+        kind = item.get("type")
+        if kind == "reasoning":
+            continue
+        if kind == "custom_tool_call" and isinstance(item.get("input"), str):
+            item["type"] = "function_call"
+            item["arguments"] = json.dumps({"input": item.pop("input")}, ensure_ascii=False)
+            item.pop("id", None)
+        elif kind == "custom_tool_call_output":
+            item["type"] = "function_call_output"
+            item.pop("id", None)
+        output = item.get("output")
+        if (
+            not supports_vision
+            and kind in ("function_call_output", "custom_tool_call_output")
+            and isinstance(output, list)
+        ):
+            item["output"] = [
+                {"type": "input_text", "text": "[Earlier tool image omitted: this model accepts text only.]"}
+                if isinstance(part, dict) and part.get("type") == "input_image"
+                else part
+                for part in output
+            ]
+        projected.append(item)
+    payload["input"] = projected

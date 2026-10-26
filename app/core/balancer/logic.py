@@ -20,6 +20,7 @@ PERMANENT_FAILURE_CODES = {
     "refresh_token_invalidated": "Refresh token was revoked - re-login required",
     "invalid_grant": "Refresh token grant invalid - re-login required",
     "token_invalidated": "Authentication token invalidated - re-login required",
+    "token_revoked": "Authentication access token revoked - re-login required",
     # ``token_expired`` from the OAuth refresh endpoint means the refresh
     # request itself failed because the refresh token (or the session it
     # belonged to) is no longer usable -- access-token-only expiry would have
@@ -46,6 +47,7 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
         "refresh_token_invalidated",
         "invalid_grant",
         "token_invalidated",
+        "token_revoked",
         "token_expired",
         "app_session_terminated",
         "account_session_expired",
@@ -457,10 +459,9 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
 
 def _known_expired_reauth(state: AccountState, current: float) -> bool:
     """Return whether a warning-state account has crossed known token expiry."""
-    return (
-        state.status == AccountStatus.REAUTH_REQUIRED
-        and state.access_token_expires_at is not None
-        and state.access_token_expires_at <= current
+    return state.status == AccountStatus.REAUTH_REQUIRED and (
+        state.deactivation_reason == PERMANENT_FAILURE_CODES["token_revoked"]
+        or (state.access_token_expires_at is not None and state.access_token_expires_at <= current)
     )
 
 
