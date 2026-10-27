@@ -25,7 +25,7 @@ from app.modules.model_sources.forwarding import (
     source_stream_idle_seconds,
 )
 from app.modules.model_sources.repository import ModelSourcesRepository
-from tests.integration.model_source_helpers import stub_source_upstreams
+from tests.integration.model_source_helpers import _enable_api_key_auth, stub_source_upstreams
 
 pytestmark = pytest.mark.integration
 
@@ -415,3 +415,61 @@ async def test_claude_invalid_account_input_does_not_reflect_secrets(async_clien
     assert response.status_code in {400, 422}
     assert "private-access" not in response.text
     assert "private-refresh" not in response.text
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    "metadata,thinking",
+    [('{"request_kind":"compaction"}', False), ('{"request_kind":"turn"}', True), ("[]", True), ("invalid-json", True)],
+)
+async def test_claude_compaction_reserves_output_for_summary(async_client, monkeypatch, path, metadata, thinking):
+    captured = []
+
+    async def upstream(request):
+        captured.append(await request.json())
+        return web.Response(body=_frames(), content_type="text/event-stream")
+
+    async with stub_source_upstreams() as start:
+        await _source(async_client, await start(upstream), monkeypatch)
+        response = await async_client.post(
+            path,
+            headers={"x-codex-turn-metadata": metadata},
+            json={
+                "model": "claude-opus-5-5",
+                "input": "Summarize the conversation",
+                "stream": True,
+                "reasoning": {"effort": "max"},
+                "max_output_tokens": 1234,
+                "client_metadata": {"private_telemetry": "must-not-forward"},
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert ("thinking" in captured[0]) is thinking
+        assert captured[0]["max_tokens"] == 1234
+        assert "must-not-forward" not in json.dumps(captured[0])
+
+
+@pytest.mark.parametrize("policy", [{"enforcedReasoningEffort": "max"}, {"allowedReasoningEfforts": ["max"]}])
+async def test_claude_compaction_preserves_explicit_key_reasoning_policy(async_client, monkeypatch, policy):
+    captured = []
+
+    async def upstream(request):
+        captured.append(await request.json())
+        return web.Response(body=_frames(), content_type="text/event-stream")
+
+    async with stub_source_upstreams() as start:
+        await _source(async_client, await start(upstream), monkeypatch)
+        created = await async_client.post("/api/api-keys/", json={"name": "Reasoning policy", **policy})
+        assert created.status_code == 200
+        await _enable_api_key_auth(async_client)
+        response = await async_client.post(
+            "/backend-api/codex/responses",
+            headers={
+                "Authorization": "Bearer " + created.json()["key"],
+                "x-codex-turn-metadata": '{"request_kind":"compaction"}',
+            },
+            json={"model": "claude-opus-5-5", "input": "Summarize", "stream": True, "reasoning": {"effort": "max"}},
+        )
+        assert response.status_code == 200
+        assert captured[0]["thinking"] == {"type": "adaptive"}
+        assert captured[0]["output_config"]["effort"] == "max"

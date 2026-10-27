@@ -256,6 +256,7 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.compact import _request_kind_from_headers as _compact_request_kind_from_headers
 from app.modules.proxy._service.observability import record_http_bridge_routing
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
@@ -5189,6 +5190,18 @@ async def _source_responses_response(
         raise
     try:
         source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
+        if (
+            source.kind == "anthropic"
+            and _compact_request_kind_from_headers(request.headers) == "compaction"
+            and (
+                api_key is None
+                or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
+            )
+        ):
+            # Compaction is a bounded summary utility, not another max-effort
+            # investigation. Its reasoning must leave room for the summary.
+            reasoning = source_payload.get("reasoning")
+            source_payload["reasoning"] = {**(reasoning if isinstance(reasoning, dict) else {}), "effort": "none"}
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream

@@ -240,3 +240,25 @@ def test_native_options_preserve_reasoning_and_reject_sampling(tmp_path, effort,
     with pytest.raises(native.ModelSourceForwardingError) as exc:
         native._options(request, _account(), tmp_path, tmp_path, seconds=30, clock=REAL_CLOCK)
     assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("image", [False, True])
+def test_native_replay_keeps_followup_instruction_after_completed_results(tmp_path, image):
+    encryptor = TokenEncryptor(key=Fernet.generate_key())
+    original = _request(encryptor, replay=True).original
+    followup = [{"type": "input_text", "text": "Perform CONTEXT CHECKPOINT COMPACTION. Summarize; do not resume."}]
+    if image:
+        followup.append({"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="})
+    request = project_claude_request(
+        {**original, "tools": [], "input": [*original["input"], {"role": "user", "content": followup}]},
+        source_id="src_test",
+        encryptor=encryptor,
+    )
+    options, prompt = native._options(request, _account(), tmp_path, tmp_path, seconds=30, clock=REAL_CLOCK)
+    assert prompt[0] == {"type": "text", "text": followup[0]["text"]}
+    assert [part["type"] for part in prompt] == (["text", "image"] if image else ["text"])
+    transcript = next((tmp_path / "projects").rglob("*.jsonl"))
+    history = [json.loads(line)["message"] for line in transcript.read_text().splitlines()]
+    assert [part["type"] for part in history[-1]["content"]] == ["tool_result"]
+    assert history[-1]["content"][0]["tool_use_id"] == "toolu_previous"
+    assert options.resume is not None

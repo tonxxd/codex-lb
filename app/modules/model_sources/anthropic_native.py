@@ -128,9 +128,19 @@ def _native_history(
     last = cast(list[JsonValue], messages[-1]["content"])
     # Native resume repairs unfinished calls before accepting a new prompt.
     # Seed completed external results with their calls, then trigger continuation.
-    has_results = any(isinstance(part, dict) and part.get("type") == "tool_result" for part in last)
-    history = messages if has_results else messages[:-1]
-    prompt: list[JsonValue] = [{"type": "text", "text": _CONTINUE}] if has_results else last
+    last_result = max(
+        (index for index, part in enumerate(last) if isinstance(part, dict) and part.get("type") == "tool_result"),
+        default=-1,
+    )
+    if last_result >= 0:
+        # Codex appends compaction and other follow-up instructions after tool
+        # outputs. Keep those instructions as the real prompt, rather than
+        # replacing them with a generic request to continue the original task.
+        prompt = last[last_result + 1 :] or [{"type": "text", "text": _CONTINUE}]
+        messages[-1]["content"] = last[: last_result + 1]
+        history = messages
+    else:
+        history, prompt = messages[:-1], last
     if not history:
         return None, prompt
     session_id = str(uuid4())

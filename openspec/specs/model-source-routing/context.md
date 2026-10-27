@@ -47,3 +47,15 @@ hosted pool owns subsequent rotations. Replace accounts through source settings
 if a new sign-in is needed. Forced tool choice, serial-tool enforcement, explicit
 sampling, structured output, and server-owned response/file references are not
 supported and fail explicitly.
+
+Codex may append a compaction instruction after completed tool results in the
+same projected user message. Native replay seeds history through the last result
+and sends subsequent text/image blocks as the actual prompt. A result-only
+continuation retains its existing continuation prompt.
+
+Explicitly tagged Claude compaction is a summary utility with thinking disabled
+when the key has no explicit reasoning policy. This keeps maximum effort on
+normal work from exhausting the summary's output allowance. Normal reasoning
+selection, key-level policies, explicit output ceilings, and other providers
+retain their behavior. The policy uses Codex turn metadata, which is stripped
+before source forwarding, rather than matching summary prompt text.
