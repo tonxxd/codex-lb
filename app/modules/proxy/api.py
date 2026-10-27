@@ -5282,7 +5282,8 @@ def _shape_source_responses_payload(
             }
         else:
             source_payload["reasoning"] = {"effort": source_reasoning_effort}
-    strip_replayed_tool_call_namespaces_from_payload(source_payload)
+    if source.kind != "anthropic":
+        strip_replayed_tool_call_namespaces_from_payload(source_payload)
     if urlsplit(source.base_url).hostname == "api.abliteration.ai":
         project_abliteration_history(
             source_payload,
@@ -5292,7 +5293,9 @@ def _shape_source_responses_payload(
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
     _drop_unsupported_source_response_tools(
         source_payload,
-        supported_tool_types=source_model_supported_tool_types(source, payload.model),
+        supported_tool_types=frozenset({"namespace", "custom"})
+        if source.kind == "anthropic"
+        else source_model_supported_tool_types(source, payload.model),
     )
     return source_payload
 

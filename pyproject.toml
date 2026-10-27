@@ -68,6 +68,7 @@ dependencies = [
     "websockets>=16.0",
     "zstandard>=0.25.0",
     "aiohttp-socks>=0.10.1",
+    "claude-agent-sdk==0.2.174",
 ]
 
 [project.optional-dependencies]

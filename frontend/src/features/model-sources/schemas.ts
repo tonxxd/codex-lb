@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+export const ClaudeAccountInputSchema = z.object({
+  id: z.string().min(1).max(128),
+  name: z.string().min(1).max(255),
+  accessToken: z.string().min(1),
+  refreshToken: z.string().min(1),
+  expiresAt: z.iso.datetime({ offset: true }),
+});
+
+const ClaudeAccountInfoSchema = ClaudeAccountInputSchema.omit({
+  accessToken: true,
+  refreshToken: true,
+}).extend({
+  cooldownUntil: z.iso.datetime({ offset: true }).nullable().optional(),
+  needsReauthentication: z.boolean(),
+});
+
 export const ModelSourceModelSchema = z.object({
   id: z.number(),
   sourceId: z.string(),
@@ -21,6 +37,7 @@ export const ModelSourceModelSchema = z.object({
 });
 
 export const ModelSourceSchema = z.object({
+  anthropicAccounts: z.array(ClaudeAccountInfoSchema).optional(),
   id: z.string(),
   name: z.string(),
   kind: z.string(),
@@ -59,6 +76,12 @@ export const ModelSourceModelInputSchema = z.object({
 });
 
 export const ModelSourceCreateRequestSchema = z.object({
+  kind: z.enum(["openai_compatible", "anthropic"]).optional(),
+  anthropicAccounts: z
+    .array(ClaudeAccountInputSchema)
+    .min(1)
+    .max(50)
+    .optional(),
   name: z.string().min(1).max(128),
   baseUrl: z.string().min(1).max(2048),
   apiKey: z.string().min(1).nullable().optional(),
@@ -72,6 +95,11 @@ export const ModelSourceCreateRequestSchema = z.object({
 });
 
 export const ModelSourceUpdateRequestSchema = z.object({
+  anthropicAccounts: z
+    .array(ClaudeAccountInputSchema)
+    .min(1)
+    .max(50)
+    .optional(),
   name: z.string().min(1).max(128).optional(),
   baseUrl: z.string().min(1).max(2048).optional(),
   apiKey: z.string().min(1).nullable().optional(),
@@ -88,5 +116,9 @@ export const ModelSourceUpdateRequestSchema = z.object({
 export type ModelSource = z.infer<typeof ModelSourceSchema>;
 export type ModelSourceModel = z.infer<typeof ModelSourceModelSchema>;
 export type ModelSourceModelInput = z.infer<typeof ModelSourceModelInputSchema>;
-export type ModelSourceCreateRequest = z.infer<typeof ModelSourceCreateRequestSchema>;
-export type ModelSourceUpdateRequest = z.infer<typeof ModelSourceUpdateRequestSchema>;
+export type ModelSourceCreateRequest = z.infer<
+  typeof ModelSourceCreateRequestSchema
+>;
+export type ModelSourceUpdateRequest = z.infer<
+  typeof ModelSourceUpdateRequestSchema
+>;

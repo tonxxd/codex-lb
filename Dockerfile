@@ -56,6 +56,7 @@ RUN apt-get update \
         libsystemd0 libudev1 libuuid1 openssl perl-base sed util-linux \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssl-provider-legacy \
+        libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip uninstall -y pip setuptools wheel || true \

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
+from app.modules.model_sources.anthropic_credentials import ClaudeAccountInfo, ClaudeAccountInput
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -31,6 +33,8 @@ class ModelSourceModelResponse(ModelSourceModelInput):
 
 
 class ModelSourceCreateRequest(DashboardModel):
+    kind: Literal["openai_compatible", "anthropic"] = "openai_compatible"
+    anthropic_accounts: list[ClaudeAccountInput] | None = Field(default=None, min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=128)
     base_url: str = Field(min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, min_length=1)
@@ -44,6 +48,7 @@ class ModelSourceCreateRequest(DashboardModel):
 
 
 class ModelSourceUpdateRequest(DashboardModel):
+    anthropic_accounts: list[ClaudeAccountInput] | None = Field(default=None, min_length=1, max_length=50)
     name: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, min_length=1)
@@ -58,6 +63,7 @@ class ModelSourceUpdateRequest(DashboardModel):
 
 
 class ModelSourceResponse(DashboardModel):
+    anthropic_accounts: list[ClaudeAccountInfo] = Field(default_factory=list)
     id: str
     name: str
     kind: str

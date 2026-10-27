@@ -24,7 +24,7 @@ def source_models_to_upstream_models(sources: list[ModelSource]) -> list[Upstrea
     for source in sources:
         if not source.is_enabled:
             continue
-        if source.kind != MODEL_SOURCE_KIND_OPENAI_COMPATIBLE:
+        if source.kind not in {MODEL_SOURCE_KIND_OPENAI_COMPATIBLE, "anthropic"}:
             continue
         for source_model in source.models:
             if not source_model.is_enabled:

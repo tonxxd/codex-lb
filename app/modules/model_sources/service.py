@@ -6,6 +6,12 @@ from urllib.parse import urlparse
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import ModelSource, ModelSourceModel
+from app.modules.model_sources.anthropic_credentials import (
+    ANTHROPIC_BASE_URL,
+    ANTHROPIC_KIND,
+    ClaudeAccountInput,
+    ClaudePool,
+)
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.schemas import (
     ModelSourceCreateRequest,
@@ -39,19 +45,33 @@ class ModelSourcesService:
 
     async def list_sources(self) -> list[ModelSourceResponse]:
         rows = await self._repository.list_sources()
-        return [_to_response(row) for row in rows]
+        return [_to_response(row, encryptor=self._encryptor) for row in rows]
 
     async def list_enabled_sources(self) -> list[ModelSource]:
         return await self._repository.list_enabled_sources()
 
     async def create_source(self, payload: ModelSourceCreateRequest) -> ModelSourceResponse:
         model_rows = _model_inputs_to_rows(payload.models)
+        credentials = _encrypt_optional(self._encryptor, payload.api_key)
+        if payload.kind == ANTHROPIC_KIND:
+            _validate_anthropic_config(
+                payload.base_url,
+                payload.supports_chat_completions,
+                payload.supports_responses,
+                payload.supports_audio_transcriptions,
+                payload.supports_embeddings,
+            )
+            if payload.api_key is not None or not payload.anthropic_accounts:
+                raise ModelSourceValidationError("A Claude source needs its account pool instead of an API key")
+            credentials = _encrypt_claude_pool(self._encryptor, payload.anthropic_accounts)
+        elif payload.anthropic_accounts is not None:
+            raise ModelSourceValidationError("Claude accounts require an Anthropic source")
         row = ModelSource(
             id=f"src_{uuid.uuid4().hex}",
             name=_normalize_name(payload.name),
-            kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+            kind=payload.kind,
             base_url=_normalize_base_url(payload.base_url),
-            api_key_encrypted=_encrypt_optional(self._encryptor, payload.api_key),
+            api_key_encrypted=credentials,
             is_enabled=True,
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
@@ -67,7 +87,7 @@ class ModelSourcesService:
         except Exception:
             await self._repository.rollback()
             raise
-        return _to_response(created)
+        return _to_response(created, encryptor=self._encryptor)
 
     async def update_source(self, source_id: str, payload: ModelSourceUpdateRequest) -> ModelSourceResponse:
         row = await self._repository.get_by_id(source_id)
@@ -75,6 +95,26 @@ class ModelSourcesService:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
 
         fields = payload.model_fields_set
+        if row.kind == ANTHROPIC_KIND:
+            if "api_key" in fields:
+                raise ModelSourceValidationError("Replace Claude accounts using anthropic_accounts")
+            _validate_anthropic_config(
+                payload.base_url if payload.base_url is not None else row.base_url,
+                payload.supports_chat_completions
+                if payload.supports_chat_completions is not None
+                else row.supports_chat_completions,
+                payload.supports_responses if payload.supports_responses is not None else row.supports_responses,
+                payload.supports_audio_transcriptions
+                if payload.supports_audio_transcriptions is not None
+                else row.supports_audio_transcriptions,
+                payload.supports_embeddings if payload.supports_embeddings is not None else row.supports_embeddings,
+            )
+            if "anthropic_accounts" in fields:
+                if not payload.anthropic_accounts:
+                    raise ModelSourceValidationError("A Claude pool needs at least one account")
+                row.api_key_encrypted = _encrypt_claude_pool(self._encryptor, payload.anthropic_accounts)
+        elif "anthropic_accounts" in fields:
+            raise ModelSourceValidationError("Claude accounts require an Anthropic source")
         if "name" in fields and payload.name is not None:
             row.name = _normalize_name(payload.name)
         if "base_url" in fields and payload.base_url is not None:
@@ -115,7 +155,7 @@ class ModelSourcesService:
         refreshed = await self._repository.get_by_id(source_id)
         if refreshed is None:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
-        return _to_response(refreshed)
+        return _to_response(refreshed, encryptor=self._encryptor)
 
     async def delete_source(self, source_id: str) -> None:
         deleted = await self._repository.delete(source_id)
@@ -216,8 +256,16 @@ def _to_model_response(row: ModelSourceModel) -> ModelSourceModelResponse:
     )
 
 
-def _to_response(row: ModelSource) -> ModelSourceResponse:
+def _to_response(row: ModelSource, *, encryptor: TokenEncryptor | None = None) -> ModelSourceResponse:
+    accounts = []
+    if row.kind == ANTHROPIC_KIND and row.api_key_encrypted is not None:
+        try:
+            pool = ClaudePool.model_validate_json((encryptor or TokenEncryptor()).decrypt(row.api_key_encrypted))
+            accounts = [account.public() for account in pool.accounts]
+        except Exception as exc:
+            raise ModelSourceValidationError("Claude credentials could not be read") from exc
     return ModelSourceResponse(
+        anthropic_accounts=accounts,
         id=row.id,
         name=row.name,
         kind=row.kind,
@@ -234,3 +282,18 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         updated_at=row.updated_at,
         models=[_to_model_response(model) for model in row.models],
     )
+
+
+def _validate_anthropic_config(base_url: str, chat: bool, responses: bool, audio: bool, embeddings: bool) -> None:
+    if base_url.strip().rstrip("/") != ANTHROPIC_BASE_URL:
+        raise ModelSourceValidationError("Claude accounts require https://api.anthropic.com/v1")
+    if chat or not responses or audio or embeddings:
+        raise ModelSourceValidationError("Claude sources support the Responses protocol only")
+
+
+def _encrypt_claude_pool(encryptor: TokenEncryptor, accounts: list[ClaudeAccountInput]) -> bytes:
+    try:
+        pool = ClaudePool.from_inputs(accounts)
+    except ValueError as exc:
+        raise ModelSourceValidationError("Claude accounts must have unique IDs and valid credentials") from exc
+    return encryptor.encrypt(pool.model_dump_json())

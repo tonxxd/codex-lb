@@ -387,6 +387,10 @@ async def forward_responses(
     encryptor: TokenEncryptor | None = None,
     recode_credential_failures: bool = True,
 ) -> SourceResponsesCompletion:
+    if source.kind == "anthropic":
+        from app.modules.model_sources.anthropic import forward_claude_responses
+
+        return await forward_claude_responses(source, payload, encryptor=encryptor)
     try:
         async with lease_model_source_session() as session:
             # Non-stream generations legitimately spend minutes before the
@@ -507,6 +511,12 @@ async def stream_responses(
     scheduler: Scheduler = REAL_SCHEDULER,
     clock: Clock = REAL_CLOCK,
 ) -> SourceResponsesStream:
+    if source.kind == "anthropic":
+        from app.modules.model_sources.anthropic import stream_claude_responses
+
+        return await stream_claude_responses(
+            source, payload, encryptor=encryptor, on_first_content=on_first_content, scheduler=scheduler, clock=clock
+        )
     usage_holder = SourceUsageHolder()
     usage_parser = SourceStreamUsageParser(usage_holder, response_shape="responses")
     stack, response, first_chunk = await _open_source_stream(

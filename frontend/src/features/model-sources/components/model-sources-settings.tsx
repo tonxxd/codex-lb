@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ModelSourceCreateDialog } from "@/features/model-sources/components/model-source-create-dialog";
+import { ClaudePoolImportDialog } from "@/features/model-sources/components/claude-pool-import-dialog";
 import { ModelSourceEditDialog } from "@/features/model-sources/components/model-source-edit-dialog";
 import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import type {
@@ -40,15 +41,14 @@ function protocolBadges(source: ModelSource) {
   ].filter((value): value is string => value !== null);
 }
 
-export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsProps) {
+export function ModelSourcesSettings({
+  disabled = false,
+}: ModelSourcesSettingsProps) {
   const { t } = useTranslation();
-  const {
-    modelSourcesQuery,
-    createMutation,
-    updateMutation,
-    deleteMutation,
-  } = useModelSources();
+  const { modelSourcesQuery, createMutation, updateMutation, deleteMutation } =
+    useModelSources();
   const createDialog = useDialogState();
+  const claudeDialog = useDialogState<{ source: ModelSource | null }>();
   const editDialog = useDialogState<ModelSource>();
   const deleteDialog = useDialogState<ModelSource>();
   const sources = modelSourcesQuery.data?.sources ?? [];
@@ -68,7 +68,10 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
     await createMutation.mutateAsync(payload);
   };
 
-  const updateSource = async (sourceId: string, payload: ModelSourceUpdateRequest) => {
+  const updateSource = async (
+    sourceId: string,
+    payload: ModelSourceUpdateRequest,
+  ) => {
     await updateMutation.mutateAsync({ sourceId, payload });
   };
 
@@ -80,20 +83,33 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
             <Database className="h-4 w-4 text-primary" aria-hidden="true" />
           </div>
           <div>
-	            <h3 className="text-sm font-semibold">{t("modelSources.title")}</h3>
-	            <p className="text-xs text-muted-foreground">{t("modelSources.description")}</p>
+            <h3 className="text-sm font-semibold">{t("modelSources.title")}</h3>
+            <p className="text-xs text-muted-foreground">
+              {t("modelSources.description")}
+            </p>
           </div>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          className="h-8 gap-1.5 text-xs"
-          disabled={busy}
-          onClick={() => createDialog.show()}
-        >
-          <Plus className="h-3.5 w-3.5" />
-	          {t("modelSources.actions.addSource")}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => claudeDialog.show({ source: null })}
+          >
+            Import Claude accounts
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            disabled={busy}
+            onClick={() => createDialog.show()}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t("modelSources.actions.addSource")}
+          </Button>
+        </div>
       </div>
 
       {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -107,7 +123,9 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{source.name}</span>
                     <Badge variant={source.isEnabled ? "default" : "secondary"}>
-	                      {source.isEnabled ? t("common.states.enabled") : t("common.states.disabled")}
+                      {source.isEnabled
+                        ? t("common.states.enabled")
+                        : t("common.states.disabled")}
                     </Badge>
                     {protocolBadges(source).map((protocol) => (
                       <Badge key={protocol} variant="secondary">
@@ -115,21 +133,55 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                       </Badge>
                     ))}
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">{source.baseUrl}</div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {source.baseUrl}
+                  </div>
+                  {source.kind === "anthropic" ? (
+                    <div className="space-y-1 text-xs text-muted-foreground">
+                      {(source.anthropicAccounts ?? []).map((account) => (
+                        <div key={account.id}>
+                          {account.name}
+                          {account.needsReauthentication
+                            ? " · Sign-in required"
+                            : account.cooldownUntil
+                              ? ` · Cooldown until ${new Date(account.cooldownUntil).toLocaleString()}`
+                              : ""}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-1 pt-1">
                     {source.models.map((model) => (
-                      <Badge key={model.id} variant={model.isEnabled ? "outline" : "secondary"}>
+                      <Badge
+                        key={model.id}
+                        variant={model.isEnabled ? "outline" : "secondary"}
+                      >
                         {model.model}
                       </Badge>
                     ))}
                     {modelPriceLabel(source) ? (
-                      <Badge variant="secondary">{modelPriceLabel(source)}</Badge>
+                      <Badge variant="secondary">
+                        {modelPriceLabel(source)}
+                      </Badge>
                     ) : null}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  {source.kind === "anthropic" ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => claudeDialog.show({ source })}
+                    >
+                      Replace accounts
+                    </Button>
+                  ) : null}
                   <Switch
-	                    aria-label={t("modelSources.actions.toggleAria", { name: source.name })}
+                    aria-label={t("modelSources.actions.toggleAria", {
+                      name: source.name,
+                    })}
                     checked={source.isEnabled}
                     disabled={busy}
                     onCheckedChange={(checked) =>
@@ -147,7 +199,11 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     onClick={() => editDialog.show(source)}
                   >
                     <Pencil className="size-4" />
-	                    <span className="sr-only">{t("modelSources.actions.editAria", { name: source.name })}</span>
+                    <span className="sr-only">
+                      {t("modelSources.actions.editAria", {
+                        name: source.name,
+                      })}
+                    </span>
                   </Button>
                   <Button
                     type="button"
@@ -157,7 +213,11 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     onClick={() => deleteDialog.show(source)}
                   >
                     <Trash2 className="size-4" />
-	                    <span className="sr-only">{t("modelSources.actions.deleteAria", { name: source.name })}</span>
+                    <span className="sr-only">
+                      {t("modelSources.actions.deleteAria", {
+                        name: source.name,
+                      })}
+                    </span>
                   </Button>
                 </div>
               </div>
@@ -165,7 +225,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
           ))
         ) : (
           <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-	            {t("modelSources.empty")}
+            {t("modelSources.empty")}
           </div>
         )}
       </div>
@@ -175,6 +235,15 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
         busy={createMutation.isPending}
         onOpenChange={createDialog.onOpenChange}
         onSubmit={createSource}
+      />
+
+      <ClaudePoolImportDialog
+        open={claudeDialog.open}
+        busy={busy}
+        source={claudeDialog.data?.source ?? null}
+        onOpenChange={claudeDialog.onOpenChange}
+        onCreate={createSource}
+        onUpdate={updateSource}
       />
 
       <ModelSourceEditDialog
@@ -187,13 +256,15 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
 
       <ConfirmDialog
         open={deleteDialog.open}
-	        title={t("modelSources.deleteDialog.title")}
-	        description={t("modelSources.deleteDialog.description")}
-	        confirmLabel={t("common.actions.delete")}
+        title={t("modelSources.deleteDialog.title")}
+        description={t("modelSources.deleteDialog.description")}
+        confirmLabel={t("common.actions.delete")}
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
           if (!deleteDialog.data) return;
-          void deleteMutation.mutateAsync(deleteDialog.data.id).finally(() => deleteDialog.hide());
+          void deleteMutation
+            .mutateAsync(deleteDialog.data.id)
+            .finally(() => deleteDialog.hide());
         }}
       />
     </section>
